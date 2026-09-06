@@ -1,0 +1,3 @@
+# 이 시스템의 기본 pip가 참조하는 PyPI 미러가 예전 버전(2024.10.22)에 고정되어 있어,
+# 유튜브의 최신 변경사항에 대응하려면 GitHub master에서 직접 설치해야 한다.
+yt-dlp @ https://github.com/yt-dlp/yt-dlp/archive/refs/heads/master.tar.gz
