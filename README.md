@@ -2,9 +2,14 @@
 
 유튜브 링크에서 오디오를 추출해 mp3 파일로 저장하는 CLI 도구.
 
+저장소: <https://github.com/kwh8121/youtube-to-mp3>
+
 ## 설치
 
 ```bash
+git clone https://github.com/kwh8121/youtube-to-mp3.git
+cd youtube-to-mp3
+
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
@@ -42,6 +47,14 @@ python3 -m venv .venv
 
 ```bash
 ./main.py "https://www.youtube.com/watch?v=VIDEO_ID"
+```
+
+### 재생목록 전체 다운로드
+
+재생목록 링크를 넘기면 포함된 영상을 모두 mp3로 받습니다.
+
+```bash
+./main.py "https://www.youtube.com/playlist?list=PLxxxx"
 ```
 
 ### 저장 디렉토리와 음질 지정
@@ -83,4 +96,19 @@ python3 -m venv .venv
 
 ```bash
 ./main.py "downloads/모음 영상 제목.mp3" --split-by-silence
+```
+
+### 재생목록을 받으면서 각 영상을 곡 단위로 분할
+
+`--split-by-silence`는 다운로드된 파일 각각에 적용되므로, 재생목록과 함께 쓰면
+영상별로 분할이 수행됩니다.
+
+```bash
+./main.py "https://www.youtube.com/playlist?list=PLxxxx" --split-by-silence --output-dir my_music
+```
+
+### 전체 옵션 확인
+
+```bash
+./main.py --help
 ```
