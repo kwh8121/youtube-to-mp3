@@ -17,11 +17,15 @@ MAX_TITLE_WORDS = 7
 
 
 def truncate_title(title: str, max_words: int = MAX_TITLE_WORDS) -> str:
-    """제목을 공백 기준 최대 max_words 단어로 줄인다."""
+    """제목을 공백 기준 최대 max_words 단어로 줄이고 끝의 점과 공백을 뗀다.
+
+    "(Feat." 처럼 점으로 끝나는 제목에 확장자가 붙으면 "(Feat..mp3"가 되므로
+    끝의 점을 제거한다. 점만 남는 제목이면 원래 제목을 그대로 돌려준다.
+    """
     words = title.split()
-    if len(words) <= max_words:
-        return title
-    return " ".join(words[:max_words])
+    if len(words) > max_words:
+        title = " ".join(words[:max_words])
+    return title.rstrip(" .") or title
 
 
 def unique_path(path: Path) -> Path:
