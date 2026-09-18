@@ -328,6 +328,42 @@ def split_audio_by_chapters(path: str) -> None:
     print(f"분할 완료: '{title}' -> {len(segments)}개 트랙 ({out_dir})")
 
 
+def noise_db_value(value: str) -> str:
+    """--noise-db 값이 ffmpeg silencedetect가 받는 형식인지 검사한다.
+
+    ffmpeg는 '-35dB'처럼 대문자 dB 단위가 붙은 값이나 0 이상의 진폭 비율만 받는다.
+    잘못된 값은 분할 단계가 아니라 인자 파싱 단계에서 바로 알려준다.
+    """
+    if not re.fullmatch(r"-?\d+(\.\d+)?dB|\d+(\.\d+)?", value):
+        raise argparse.ArgumentTypeError(
+            f"올바르지 않은 값입니다: '{value}'. '-35dB'처럼 dB 단위를 붙여 입력하세요."
+        )
+    return value
+
+
+def join_noise_db_value(argv: list[str]) -> list[str]:
+    """'--noise-db -30dB'를 '--noise-db=-30dB'로 합친다.
+
+    argparse는 '-'로 시작하는 값을 다른 옵션으로 오인해 'expected one argument'
+    오류를 낸다. 숫자로 시작하는 값일 때만 합쳐서, 값을 빠뜨린 경우의 오류는 그대로
+    두고 형식 검사는 noise_db_value에 맡긴다.
+    """
+    result = []
+    i = 0
+    while i < len(argv):
+        if (
+            argv[i] == "--noise-db"
+            and i + 1 < len(argv)
+            and re.fullmatch(r"-\d[\w.]*", argv[i + 1])
+        ):
+            result.append(f"--noise-db={argv[i + 1]}")
+            i += 2
+        else:
+            result.append(argv[i])
+            i += 1
+    return result
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="유튜브 링크에서 오디오를 추출해 mp3로 변환합니다."
@@ -363,6 +399,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--noise-db",
+        type=noise_db_value,
         default="-35dB",
         help="무음으로 간주할 볼륨 임계값 (기본값: -35dB)",
     )
@@ -378,7 +415,7 @@ def parse_args() -> argparse.Namespace:
         default=30.0,
         help="분할된 트랙의 최소 길이, 초 (기본값: 30)",
     )
-    return parser.parse_args()
+    return parser.parse_args(join_noise_db_value(sys.argv[1:]))
 
 
 def split_file(path: str, args: argparse.Namespace) -> None:
