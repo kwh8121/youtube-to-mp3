@@ -16,20 +16,21 @@ import yt_dlp
 MAX_TITLE_WORDS = 7
 
 
-def replace_fullwidth_chars(title: str) -> str:
-    """yt-dlp가 파일명에 넣은 전각 대체 문자를 읽기 쉬운 일반 문자로 바꾼다.
+def replace_unsafe_chars(title: str) -> str:
+    """파일명에 쓸 수 없는 문자와 그 전각 대체 문자를 읽기 쉬운 일반 문자로 바꾼다.
 
-    yt-dlp는 파일명에 쓸 수 없는 | : / \\ 등을 ｜ ： ⧸ ⧹ 같은 전각 문자로 바꿔 저장한다.
-    구분자 역할을 하는 문자는 하이픈으로, 따옴표는 작은따옴표로 바꾸고 나머지는 지운다.
+    yt-dlp는 | : / \\ 등을 ｜ ： ⧸ ⧹ 같은 전각 문자로 바꿔 저장하고, 챕터 제목에는
+    원래 문자가 그대로 들어 있다. 두 경우 모두 같은 규칙으로 처리한다. 구분자 역할을
+    하는 문자는 하이픈으로, 따옴표는 작은따옴표로 바꾸고 나머지는 지운다.
     """
 
     def to_hyphen(match: re.Match[str]) -> str:
         # "Freaky ｜ Trap"처럼 앞뒤에 공백이 있으면 " - ", "AC⧸DC"처럼 붙어 있으면 "-"로 바꾼다.
         return "-" if match.group(0) == match.group(0).strip() else " - "
 
-    title = re.sub(r"\s*[｜：⧸⧹]\s*", to_hyphen, title)
-    title = title.replace("＂", "'")
-    title = re.sub(r"[？＊＜＞]", "", title)
+    title = re.sub(r"\s*[|:/\\｜：⧸⧹]\s*", to_hyphen, title)
+    title = re.sub(r'["＂]', "'", title)
+    title = re.sub(r"[?*<>？＊＜＞]", "", title)
     return re.sub(r"\s+", " ", title).strip()
 
 
@@ -110,7 +111,7 @@ def download_audio(
     renamed_files = []
     for path_str in downloaded_files:
         path = Path(path_str)
-        short_stem = truncate_title(replace_fullwidth_chars(path.stem))
+        short_stem = truncate_title(replace_unsafe_chars(path.stem))
         if short_stem == path.stem:
             renamed_files.append(path_str)
             continue
@@ -318,10 +319,10 @@ def get_chapters(path: str) -> list[tuple[float, float, str]]:
 
 
 def sanitize_filename(name: str, max_bytes: int = 200) -> str:
-    """파일명에 쓸 수 없는 문자를 '_'로 바꾸고, 파일시스템 한도를 넘지 않게 자른다."""
-    name = re.sub(r'[\\/:*?"<>|]', "_", name).strip(" .")
+    """파일명에 쓸 수 없는 문자를 다운로드 파일명과 같은 규칙으로 바꾸고, 파일시스템 한도를 넘지 않게 자른다."""
+    name = replace_unsafe_chars(name).strip(" .-")
     # 한글 등 멀티바이트 문자를 고려해 바이트 기준으로 자른다.
-    return name.encode()[:max_bytes].decode(errors="ignore").strip(" .")
+    return name.encode()[:max_bytes].decode(errors="ignore").strip(" .-")
 
 
 def split_audio_by_chapters(path: str) -> None:
