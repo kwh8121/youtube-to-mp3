@@ -6,6 +6,7 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import yt_dlp
@@ -33,14 +34,16 @@ def unique_path(path: Path) -> Path:
         i += 1
 
 
-def download_audio(url: str, output_dir: str, quality: str, no_playlist: bool = False) -> list:
+def download_audio(
+    url: str, output_dir: str, quality: str, no_playlist: bool = False
+) -> list[str]:
     """유튜브 링크(단일 영상 또는 재생목록)에서 오디오를 추출해 mp3로 저장한다.
 
     반환값은 실제로 생성된 mp3 파일 경로 목록이다.
     """
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
-    downloaded_files = []
+    downloaded_files: list[str] = []
 
     def on_postprocessor_finished(d: dict) -> None:
         if d["status"] == "finished" and d["postprocessor"] == "ExtractAudio":
@@ -114,7 +117,9 @@ def get_duration(path: str) -> float:
     return float(result.stdout.strip())
 
 
-def detect_silences(path: str, noise_db: str, silence_dur: float) -> list:
+def detect_silences(
+    path: str, noise_db: str, silence_dur: float
+) -> list[tuple[float, float]]:
     """ffmpeg silencedetect로 무음 구간(시작, 끝) 목록을 구한다."""
     result = subprocess.run(
         [
@@ -130,6 +135,8 @@ def detect_silences(path: str, noise_db: str, silence_dur: float) -> list:
         ],
         capture_output=True,
         text=True,
+        # ffmpeg가 실패했는데도 "무음 없음"으로 오인하지 않도록 종료 코드를 확인한다.
+        check=True,
     )
     starts = [float(m) for m in re.findall(r"silence_start:\s*([0-9.]+)", result.stderr)]
     ends = [float(m) for m in re.findall(r"silence_end:\s*([0-9.]+)", result.stderr)]
@@ -137,7 +144,9 @@ def detect_silences(path: str, noise_db: str, silence_dur: float) -> list:
     return list(zip(starts[:n], ends[:n]))
 
 
-def compute_split_points(silences: list, duration: float, min_track: float) -> list:
+def compute_split_points(
+    silences: list[tuple[float, float]], duration: float, min_track: float
+) -> list[float]:
     """무음 구간 목록에서 실제 트랙 경계로 쓸 분할 지점을 계산한다.
 
     파일 끝 3초 이내의 무음은 마지막 곡의 페이드아웃일 뿐이므로 제외한다.
@@ -184,44 +193,77 @@ def split_audio_by_silence(
         return
 
     title = Path(path).stem
-    out_dir = Path(path).parent / title
+    boundaries = [0.0, *splits, duration]
+    segments = [
+        (boundaries[i], boundaries[i + 1], f"{title} - {i + 1:02d}")
+        for i in range(len(boundaries) - 1)
+    ]
+    out_dir = write_tracks(path, segments)
+
+    print(f"분할 완료: '{title}' -> {len(segments)}개 트랙 ({out_dir})")
+
+
+def write_tracks(path: str, segments: list[tuple[float, float, str]]) -> Path:
+    """(시작, 끝, 파일명 stem) 목록대로 오디오를 잘라 원본 이름의 폴더에 저장한다.
+
+    트랙마다 ffmpeg를 따로 실행하면 매번 파일 처음부터 다시 읽어야 해서 트랙 수가
+    많을수록 느려진다. 대신 segment 먹서로 원본을 한 번만 읽으며 모든 경계에서
+    재인코딩 없이 자른다. 구간은 서로 이어져 있다고 가정하며, 구간 사이에 빈틈이
+    있으면 그 부분은 앞 트랙에 포함된다.
+
+    반환값은 트랙이 저장된 디렉토리다.
+    """
+    src = Path(path)
+    out_dir = src.parent / src.stem
     out_dir.mkdir(exist_ok=True)
 
-    boundaries = [0.0, *splits, duration]
-    for i in range(len(boundaries) - 1):
-        out_path = out_dir / f"{title} - {i + 1:02d}.mp3"
-        cut_segment(path, boundaries[i], boundaries[i + 1], out_path)
+    first_start = segments[0][0]
+    total = segments[-1][1] - first_start
+    # 입력 탐색(-ss) 후에는 타임스탬프가 0부터 시작하므로 경계도 첫 구간 기준으로 옮긴다.
+    split_times = ",".join(f"{start - first_start:.3f}" for start, _, _ in segments[1:])
 
-    print(f"분할 완료: '{title}' -> {len(boundaries) - 1}개 트랙 ({out_dir})")
-
-
-def cut_segment(path: str, start: float, end: float, out_path: Path) -> None:
-    """오디오 파일의 start~end 구간을 재인코딩 없이 잘라 out_path에 저장한다."""
-    subprocess.run(
-        [
+    # 먹서는 번호 패턴 파일명만 만들 수 있어 임시 디렉토리에 자른 뒤 최종 이름으로 옮긴다.
+    with tempfile.TemporaryDirectory(dir=out_dir) as tmp_dir:
+        cmd = [
             "ffmpeg",
             "-y",
             "-nostdin",
             "-loglevel",
             "error",
+            "-ss",
+            str(first_start),
             "-i",
             path,
-            "-ss",
-            str(start),
-            "-to",
-            str(end),
+            "-t",
+            str(total),
             # 원본에 삽입된 챕터 전체가 각 트랙에 그대로 복사되지 않도록 제거한다.
             "-map_chapters",
             "-1",
             "-c",
             "copy",
-            str(out_path),
-        ],
-        check=True,
-    )
+            "-f",
+            "segment",
+            # 각 트랙의 재생 시간이 0부터 시작하도록 타임스탬프를 초기화한다.
+            "-reset_timestamps",
+            "1",
+        ]
+        if split_times:
+            cmd += ["-segment_times", split_times]
+        cmd.append(str(Path(tmp_dir) / "%03d.mp3"))
+        subprocess.run(cmd, check=True)
+
+        parts = sorted(Path(tmp_dir).glob("*.mp3"))
+        if len(parts) != len(segments):
+            raise RuntimeError(
+                f"예상한 트랙 수({len(segments)})와 실제로 잘린 수({len(parts)})가 다릅니다."
+            )
+        for part, (_, _, stem) in zip(parts, segments):
+            part.replace(out_dir / f"{stem}.mp3")
+
+    return out_dir
 
 
-def get_chapters(path: str) -> list:
+def get_chapters(path: str) -> list[tuple[float, float, str]]:
     """ffprobe로 오디오 파일에 삽입된 챕터(시작, 끝, 제목) 목록을 구한다."""
     result = subprocess.run(
         ["ffprobe", "-v", "error", "-show_chapters", "-of", "json", path],
@@ -260,18 +302,17 @@ def split_audio_by_chapters(path: str) -> None:
         return
 
     title = Path(path).stem
-    out_dir = Path(path).parent / title
-    out_dir.mkdir(exist_ok=True)
-
+    segments = []
     for i, (start, end, chapter_title) in enumerate(chapters, start=1):
         # 설명란 타임스탬프의 "1." "01)" 같은 업로더 번호는 트랙 번호와 겹치므로 떼어낸다.
         chapter_title = re.sub(r"^\s*\d+\s*[.)]\s*", "", chapter_title)
         # 번호를 앞에 붙여 곡 순서를 유지하고, 챕터 제목이 겹쳐도 파일명이 충돌하지 않게 한다.
         name = sanitize_filename(chapter_title)
         stem = f"{i:02d} - {name}" if name else f"{title} - {i:02d}"
-        cut_segment(path, start, end, out_dir / f"{stem}.mp3")
+        segments.append((start, end, stem))
+    out_dir = write_tracks(path, segments)
 
-    print(f"분할 완료: '{title}' -> {len(chapters)}개 트랙 ({out_dir})")
+    print(f"분할 완료: '{title}' -> {len(segments)}개 트랙 ({out_dir})")
 
 
 def parse_args() -> argparse.Namespace:
@@ -343,11 +384,20 @@ def main() -> None:
             print(f"오류: {e}", file=sys.stderr)
             sys.exit(1)
 
+    # 한 파일의 분할 실패가 나머지 파일 처리를 막지 않도록 파일 단위로 오류를 잡는다.
+    failed = False
     for f in files:
-        if args.split_by_chapters:
-            split_audio_by_chapters(f)
-        elif args.split_by_silence:
-            split_audio_by_silence(f, args.noise_db, args.silence_dur, args.min_track)
+        try:
+            if args.split_by_chapters:
+                split_audio_by_chapters(f)
+            elif args.split_by_silence:
+                split_audio_by_silence(f, args.noise_db, args.silence_dur, args.min_track)
+        except (subprocess.CalledProcessError, OSError, RuntimeError, ValueError) as e:
+            print(f"오류: '{Path(f).name}' 분할에 실패했습니다 - {e}", file=sys.stderr)
+            failed = True
+
+    if failed:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
