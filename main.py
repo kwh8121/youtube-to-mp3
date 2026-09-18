@@ -2,6 +2,7 @@
 """유튜브 링크에서 오디오를 추출해 mp3 파일로 저장하는 CLI 도구."""
 
 import argparse
+import json
 import re
 import subprocess
 import sys
@@ -58,7 +59,15 @@ def download_audio(url: str, output_dir: str, quality: str, no_playlist: bool = 
                 "key": "FFmpegExtractAudio",
                 "preferredcodec": "mp3",
                 "preferredquality": quality,
-            }
+            },
+            # 영상 챕터(없으면 yt-dlp가 설명란 타임스탬프에서 추출한 챕터)를 mp3에
+            # 삽입해 둔다. 그래야 나중에 로컬 파일만으로도 챕터 기준 분할이 가능하다.
+            {
+                "key": "FFmpegMetadata",
+                "add_metadata": False,
+                "add_chapters": True,
+                "add_infojson": False,
+            },
         ],
         "postprocessor_hooks": [on_postprocessor_finished],
         "noplaylist": no_playlist,
@@ -181,27 +190,88 @@ def split_audio_by_silence(
     boundaries = [0.0, *splits, duration]
     for i in range(len(boundaries) - 1):
         out_path = out_dir / f"{title} - {i + 1:02d}.mp3"
-        subprocess.run(
-            [
-                "ffmpeg",
-                "-y",
-                "-nostdin",
-                "-loglevel",
-                "error",
-                "-i",
-                path,
-                "-ss",
-                str(boundaries[i]),
-                "-to",
-                str(boundaries[i + 1]),
-                "-c",
-                "copy",
-                str(out_path),
-            ],
-            check=True,
-        )
+        cut_segment(path, boundaries[i], boundaries[i + 1], out_path)
 
     print(f"분할 완료: '{title}' -> {len(boundaries) - 1}개 트랙 ({out_dir})")
+
+
+def cut_segment(path: str, start: float, end: float, out_path: Path) -> None:
+    """오디오 파일의 start~end 구간을 재인코딩 없이 잘라 out_path에 저장한다."""
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-i",
+            path,
+            "-ss",
+            str(start),
+            "-to",
+            str(end),
+            # 원본에 삽입된 챕터 전체가 각 트랙에 그대로 복사되지 않도록 제거한다.
+            "-map_chapters",
+            "-1",
+            "-c",
+            "copy",
+            str(out_path),
+        ],
+        check=True,
+    )
+
+
+def get_chapters(path: str) -> list:
+    """ffprobe로 오디오 파일에 삽입된 챕터(시작, 끝, 제목) 목록을 구한다."""
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_chapters", "-of", "json", path],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    chapters = json.loads(result.stdout).get("chapters", [])
+    return [
+        (
+            float(c["start_time"]),
+            float(c["end_time"]),
+            c.get("tags", {}).get("title", ""),
+        )
+        for c in chapters
+    ]
+
+
+def sanitize_filename(name: str, max_bytes: int = 200) -> str:
+    """파일명에 쓸 수 없는 문자를 '_'로 바꾸고, 파일시스템 한도를 넘지 않게 자른다."""
+    name = re.sub(r'[\\/:*?"<>|]', "_", name).strip(" .")
+    # 한글 등 멀티바이트 문자를 고려해 바이트 기준으로 자른다.
+    return name.encode()[:max_bytes].decode(errors="ignore").strip(" .")
+
+
+def split_audio_by_chapters(path: str) -> None:
+    """파일에 삽입된 챕터를 기준으로 오디오 파일을 여러 트랙으로 분할한다."""
+    chapters = get_chapters(path)
+
+    if len(chapters) < 2:
+        print(
+            f"알림: '{Path(path).name}'에 챕터 정보가 없어 건너뜁니다. "
+            "영상에 챕터나 설명란 타임스탬프가 없다면 --split-by-silence를 시도하세요. "
+            "챕터 삽입 기능이 생기기 전에 받은 로컬 파일이라면 유튜브 링크로 다시 받아야 합니다."
+        )
+        return
+
+    title = Path(path).stem
+    out_dir = Path(path).parent / title
+    out_dir.mkdir(exist_ok=True)
+
+    for i, (start, end, chapter_title) in enumerate(chapters, start=1):
+        # 설명란 타임스탬프의 "1." "01)" 같은 업로더 번호는 트랙 번호와 겹치므로 떼어낸다.
+        chapter_title = re.sub(r"^\s*\d+\s*[.)]\s*", "", chapter_title)
+        # 번호를 앞에 붙여 곡 순서를 유지하고, 챕터 제목이 겹쳐도 파일명이 충돌하지 않게 한다.
+        name = sanitize_filename(chapter_title)
+        stem = f"{i:02d} - {name}" if name else f"{title} - {i:02d}"
+        cut_segment(path, start, end, out_dir / f"{stem}.mp3")
+
+    print(f"분할 완료: '{title}' -> {len(chapters)}개 트랙 ({out_dir})")
 
 
 def parse_args() -> argparse.Namespace:
@@ -226,10 +296,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="재생목록 링크라도 URL에 지정된 영상 하나만 다운로드한다",
     )
-    parser.add_argument(
+    split_group = parser.add_mutually_exclusive_group()
+    split_group.add_argument(
         "--split-by-silence",
         action="store_true",
         help="다운로드한 mp3를 무음 구간 기준으로 여러 트랙으로 분할한다 (재생목록 모음 영상용)",
+    )
+    split_group.add_argument(
+        "--split-by-chapters",
+        action="store_true",
+        help="영상 챕터(또는 설명란 타임스탬프) 기준으로 mp3를 곡별로 분할한다 (곡 사이 무음이 없는 모음 영상용)",
     )
     parser.add_argument(
         "--noise-db",
@@ -267,8 +343,10 @@ def main() -> None:
             print(f"오류: {e}", file=sys.stderr)
             sys.exit(1)
 
-    if args.split_by_silence:
-        for f in files:
+    for f in files:
+        if args.split_by_chapters:
+            split_audio_by_chapters(f)
+        elif args.split_by_silence:
             split_audio_by_silence(f, args.noise_db, args.silence_dur, args.min_track)
 
 
