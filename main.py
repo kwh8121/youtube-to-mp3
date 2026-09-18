@@ -16,16 +16,34 @@ import yt_dlp
 MAX_TITLE_WORDS = 7
 
 
-def truncate_title(title: str, max_words: int = MAX_TITLE_WORDS) -> str:
-    """제목을 공백 기준 최대 max_words 단어로 줄이고 끝의 점과 공백을 뗀다.
+def replace_fullwidth_chars(title: str) -> str:
+    """yt-dlp가 파일명에 넣은 전각 대체 문자를 읽기 쉬운 일반 문자로 바꾼다.
 
-    "(Feat." 처럼 점으로 끝나는 제목에 확장자가 붙으면 "(Feat..mp3"가 되므로
-    끝의 점을 제거한다. 점만 남는 제목이면 원래 제목을 그대로 돌려준다.
+    yt-dlp는 파일명에 쓸 수 없는 | : / \\ 등을 ｜ ： ⧸ ⧹ 같은 전각 문자로 바꿔 저장한다.
+    구분자 역할을 하는 문자는 하이픈으로, 따옴표는 작은따옴표로 바꾸고 나머지는 지운다.
+    """
+
+    def to_hyphen(match: re.Match[str]) -> str:
+        # "Freaky ｜ Trap"처럼 앞뒤에 공백이 있으면 " - ", "AC⧸DC"처럼 붙어 있으면 "-"로 바꾼다.
+        return "-" if match.group(0) == match.group(0).strip() else " - "
+
+    title = re.sub(r"\s*[｜：⧸⧹]\s*", to_hyphen, title)
+    title = title.replace("＂", "'")
+    title = re.sub(r"[？＊＜＞]", "", title)
+    return re.sub(r"\s+", " ", title).strip()
+
+
+def truncate_title(title: str, max_words: int = MAX_TITLE_WORDS) -> str:
+    """제목을 공백 기준 최대 max_words 단어로 줄이고 끝의 점, 하이픈, 공백을 뗀다.
+
+    "(Feat." 처럼 점으로 끝나는 제목에 확장자가 붙으면 "(Feat..mp3"가 되고,
+    "Album Mix -"처럼 구분자에서 잘리면 하이픈이 매달리므로 끝에서 제거한다.
+    다 떼면 빈 문자열이 되는 제목이면 원래 제목을 그대로 돌려준다.
     """
     words = title.split()
     if len(words) > max_words:
         title = " ".join(words[:max_words])
-    return title.rstrip(" .") or title
+    return title.rstrip(" .-") or title
 
 
 def unique_path(path: Path) -> Path:
@@ -86,13 +104,13 @@ def download_audio(
         ydl.download([url])
 
     # 영상 제목이 그대로 파일명이 되면 너무 길어질 수 있어 다운로드가 끝난 뒤
-    # 최대 MAX_TITLE_WORDS 단어로 줄여서 다시 이름을 붙인다. 이후 무음 분할
-    # 단계도 이 파일명(stem)을 기준으로 폴더/트랙 이름을 짓기 때문에 자동으로
-    # 같은 규칙이 적용된다.
+    # 전각 대체 문자를 일반 문자로 바꾸고 최대 MAX_TITLE_WORDS 단어로 줄여서
+    # 다시 이름을 붙인다. 이후 분할 단계도 이 파일명(stem)을 기준으로 폴더/트랙
+    # 이름을 짓기 때문에 자동으로 같은 규칙이 적용된다.
     renamed_files = []
     for path_str in downloaded_files:
         path = Path(path_str)
-        short_stem = truncate_title(path.stem)
+        short_stem = truncate_title(replace_fullwidth_chars(path.stem))
         if short_stem == path.stem:
             renamed_files.append(path_str)
             continue
