@@ -3,10 +3,12 @@
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import yt_dlp
@@ -119,8 +121,12 @@ def get_duration(path: str) -> float:
 
 def detect_silences(
     path: str, noise_db: str, silence_dur: float
-) -> list[tuple[float, float]]:
-    """ffmpeg silencedetect로 무음 구간(시작, 끝) 목록을 구한다."""
+) -> tuple[list[tuple[float, float]], float | None]:
+    """ffmpeg silencedetect로 무음 구간(시작, 끝) 목록과 파일 총 길이(초)를 구한다.
+
+    총 길이는 ffmpeg가 로그에 함께 출력하는 Duration 값을 재사용해 ffprobe를 따로
+    실행하지 않는다. 로그에서 길이를 얻지 못하면 None을 돌려준다.
+    """
     result = subprocess.run(
         [
             "ffmpeg",
@@ -141,7 +147,13 @@ def detect_silences(
     starts = [float(m) for m in re.findall(r"silence_start:\s*([0-9.]+)", result.stderr)]
     ends = [float(m) for m in re.findall(r"silence_end:\s*([0-9.]+)", result.stderr)]
     n = min(len(starts), len(ends))
-    return list(zip(starts[:n], ends[:n]))
+    silences = list(zip(starts[:n], ends[:n]))
+
+    match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", result.stderr)
+    if not match:
+        return silences, None
+    hours, minutes, seconds = match.groups()
+    return silences, int(hours) * 3600 + int(minutes) * 60 + float(seconds)
 
 
 def compute_split_points(
@@ -184,8 +196,9 @@ def split_audio_by_silence(
     path: str, noise_db: str, silence_dur: float, min_track: float
 ) -> None:
     """무음 구간을 기준으로 오디오 파일을 여러 트랙으로 분할한다."""
-    duration = get_duration(path)
-    silences = detect_silences(path, noise_db, silence_dur)
+    silences, duration = detect_silences(path, noise_db, silence_dur)
+    if duration is None:
+        duration = get_duration(path)
     splits = compute_split_points(silences, duration, min_track)
 
     if not splits:
@@ -368,6 +381,14 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def split_file(path: str, args: argparse.Namespace) -> None:
+    """명령행 인자에 지정된 방식으로 파일 하나를 분할한다."""
+    if args.split_by_chapters:
+        split_audio_by_chapters(path)
+    else:
+        split_audio_by_silence(path, args.noise_db, args.silence_dur, args.min_track)
+
+
 def main() -> None:
     args = parse_args()
 
@@ -384,17 +405,26 @@ def main() -> None:
             print(f"오류: {e}", file=sys.stderr)
             sys.exit(1)
 
-    # 한 파일의 분할 실패가 나머지 파일 처리를 막지 않도록 파일 단위로 오류를 잡는다.
+    if not files or not (args.split_by_chapters or args.split_by_silence):
+        return
+
+    # 무음 탐지는 파일 전체를 디코딩해 CPU를 많이 쓰지만 ffmpeg 프로세스 하나는 사실상
+    # 코어 하나만 쓴다. 실제 작업은 하위 프로세스가 하므로 GIL 영향이 없어, 재생목록처럼
+    # 파일이 여러 개면 스레드로 동시에 분할한다.
+    workers = min(len(files), os.cpu_count() or 1)
     failed = False
-    for f in files:
-        try:
-            if args.split_by_chapters:
-                split_audio_by_chapters(f)
-            elif args.split_by_silence:
-                split_audio_by_silence(f, args.noise_db, args.silence_dur, args.min_track)
-        except (subprocess.CalledProcessError, OSError, RuntimeError, ValueError) as e:
-            print(f"오류: '{Path(f).name}' 분할에 실패했습니다 - {e}", file=sys.stderr)
-            failed = True
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(split_file, f, args): f for f in files}
+        for future in as_completed(futures):
+            # 한 파일의 분할 실패가 나머지 파일 처리를 막지 않도록 파일 단위로 오류를 잡는다.
+            try:
+                future.result()
+            except (subprocess.CalledProcessError, OSError, RuntimeError, ValueError) as e:
+                print(
+                    f"오류: '{Path(futures[future]).name}' 분할에 실패했습니다 - {e}",
+                    file=sys.stderr,
+                )
+                failed = True
 
     if failed:
         sys.exit(1)

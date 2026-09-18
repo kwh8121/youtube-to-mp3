@@ -125,7 +125,8 @@ python3 -m venv .venv
 ### 재생목록을 받으면서 각 영상을 곡 단위로 분할
 
 `--split-by-silence`, `--split-by-chapters`는 다운로드된 파일 각각에 적용되므로,
-재생목록과 함께 쓰면 영상별로 분할이 수행됩니다.
+재생목록과 함께 쓰면 영상별로 분할이 수행됩니다. 여러 파일은 CPU 코어 수만큼 동시에
+분할하므로, 파일별 완료 메시지는 재생목록 순서와 다르게 출력될 수 있습니다.
 
 ```bash
 ./main.py "https://www.youtube.com/playlist?list=PLxxxx" --split-by-silence --output-dir my_music
